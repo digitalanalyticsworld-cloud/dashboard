@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, date
 
 # --- Page Configuration (MUST be the first Streamlit command) ---
 st.set_page_config(page_title="Pulmonx Dashboard", layout="wide")
@@ -90,6 +90,16 @@ def clean_percentage_column(df, col_name, fill_value=0.0):
         df[col_name] = pd.to_numeric(s, errors='coerce').fillna(fill_value) / 100
     return df
 
+def parse_date_column(df, col_name):
+    """Parse date column to datetime, handling various date formats."""
+    if col_name in df.columns:
+        try:
+            # Try to parse dates - pandas will attempt to infer the format
+            df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
+        except Exception as e:
+            st.warning(f"Could not parse dates in column {col_name}: {e}")
+    return df
+
 # --- Load and Clean Data ---
 @st.cache_data # Cache data to avoid reloading on every rerun
 def load_and_preprocess_data(paid_file, organic_file):
@@ -107,6 +117,10 @@ def load_and_preprocess_data(paid_file, organic_file):
         st.error(f"Error loading organic data: {e}")
         return None, None, None, None
 
+    # Parse date columns
+    paid_df = parse_date_column(paid_df, 'Date')
+    organic_df = parse_date_column(organic_df, 'Created date')
+
     # Clean Paid Data
     paid_metrics_to_clean = ['Impressions', 'Clicks', 'Reach', 'Total Spent', 'Average CPM', 'Average CPC', 'Total Engagements']
     for col in paid_metrics_to_clean:
@@ -120,7 +134,6 @@ def load_and_preprocess_data(paid_file, organic_file):
     organic_df = clean_percentage_column(organic_df, 'Click through rate (CTR)', fill_value=0.0)
     organic_df = clean_percentage_column(organic_df, 'Engagement rate', fill_value=0.0)
 
-
     # Calculate Total Engagements for Organic data BEFORE aggregation
     organic_df['Calculated Total Engagements'] = (
         organic_df.get('Likes', 0) + 
@@ -129,34 +142,13 @@ def load_and_preprocess_data(paid_file, organic_file):
         organic_df.get('Clicks', 0) + 
         organic_df.get('Follows', 0)
     )
-
-    # Aggregate Paid Data by Campaign Name
-    paid_agg = paid_df.groupby('Campaign Name').agg(
-        Impressions=('Impressions', 'sum'),
-        Clicks=('Clicks', 'sum'),
-        Reach=('Reach', 'sum'),
-        Total_Spent=('Total Spent', 'sum'),
-        Total_Engagements=('Total Engagements', 'sum'),
-    ).reset_index()
-
-    # Aggregate Organic Data by Post Title and Post Type
-    organic_agg = organic_df.groupby(['Post title', 'Post type']).agg(
-        Impressions=('Impressions', 'sum'),
-        Views=('Views', 'sum'),
-        Clicks=('Clicks', 'sum'),
-        Likes=('Likes', 'sum'),
-        Comments=('Comments', 'sum'),
-        Reposts=('Reposts', 'sum'),
-        Follows=('Follows', 'sum'),
-        Total_Engagements=('Calculated Total Engagements', 'sum'),
-    ).reset_index()
     
-    return paid_agg, organic_agg, paid_df, organic_df # Return raw dataframes for content details
+    return paid_df, organic_df
 
 # Load the data from uploaded files
-paid_agg_data, organic_agg_data, paid_raw_df, organic_raw_df = load_and_preprocess_data(paid_file, organic_file)
+paid_raw_df, organic_raw_df = load_and_preprocess_data(paid_file, organic_file)
 
-if paid_agg_data is None or organic_agg_data is None:
+if paid_raw_df is None or organic_raw_df is None:
     st.stop()
 
 # Initialize variables to hold the sum of filtered impressions and clicks
@@ -176,6 +168,14 @@ def compact_multiselect(label, options, default, key=None, max_display=3):
     # Initialize session state for this specific multiselect
     if f"{key}_selections" not in st.session_state:
         st.session_state[f"{key}_selections"] = default
+    
+    # IMPORTANT FIX: Filter stored selections to only include items that exist in current options
+    stored_selections = st.session_state[f"{key}_selections"]
+    valid_selections = [item for item in stored_selections if item in options]
+    
+    # If some selections were invalid, update the session state
+    if len(valid_selections) != len(stored_selections):
+        st.session_state[f"{key}_selections"] = valid_selections
     
     # Create container for custom display
     container = st.container()
@@ -204,7 +204,7 @@ def compact_multiselect(label, options, default, key=None, max_display=3):
         selected = st.multiselect(
             f"Select {label}",
             options=options,
-            default=current_selections,
+            default=current_selections,  # Now guaranteed to be valid
             key=key,
             label_visibility="collapsed"
         )
@@ -268,6 +268,10 @@ st.markdown(
     
     .header-total {
         background-color: #4CAF50;
+    }
+    
+    .header-date {
+        background-color: #dc2626;
     }
     
     /* Metric cards */
@@ -425,6 +429,10 @@ st.markdown(
         background-color: #0ea5e9;
     }
     
+    .filter-header.date {
+        background-color: #dc2626;
+    }
+    
     .filter-header-text {
         font-weight: 500;
     }
@@ -471,6 +479,13 @@ st.markdown(
         border-radius: 8px;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
+    
+    /* Date filter styling */
+    .stDateInput {
+        background-color: white;
+        border-radius: 4px;
+        border: 1px solid #d1d5db;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -479,10 +494,109 @@ st.markdown(
 # Main Dashboard Title
 st.markdown("<h1>Pulmonx LinkedIn Dashboard</h1>", unsafe_allow_html=True)
 
+# --- Date Range Filter Section ---
+st.markdown("""
+<div class="filter-header date">
+    <div class="filter-header-text">Date Range Filter</div>
+    <div class="filter-info">Filter all data by date range</div>
+</div>
+""", unsafe_allow_html=True)
+
+# Get date ranges from both datasets
+paid_date_range = []
+organic_date_range = []
+
+if 'Date' in paid_raw_df.columns and not paid_raw_df['Date'].isna().all():
+    paid_dates = pd.to_datetime(paid_raw_df['Date'], errors='coerce').dropna()
+    if not paid_dates.empty:
+        paid_date_range = [paid_dates.min().date(), paid_dates.max().date()]
+
+if 'Created date' in organic_raw_df.columns and not organic_raw_df['Created date'].isna().all():
+    organic_dates = pd.to_datetime(organic_raw_df['Created date'], errors='coerce').dropna()
+    if not organic_dates.empty:
+        organic_date_range = [organic_dates.min().date(), organic_dates.max().date()]
+
+# Combine date ranges to get overall min/max
+all_dates = []
+if paid_date_range:
+    all_dates.extend(paid_date_range)
+if organic_date_range:
+    all_dates.extend(organic_date_range)
+
+if all_dates:
+    overall_min_date = min(all_dates)
+    overall_max_date = max(all_dates)
+    
+    # Create date range selector
+    date_cols = st.columns(2)
+    with date_cols[0]:
+        start_date = st.date_input(
+            "Start Date",
+            value=overall_min_date,
+            min_value=overall_min_date,
+            max_value=overall_max_date,
+            key="start_date"
+        )
+    with date_cols[1]:
+        end_date = st.date_input(
+            "End Date",
+            value=overall_max_date,
+            min_value=overall_min_date,
+            max_value=overall_max_date,
+            key="end_date"
+        )
+else:
+    st.warning("No valid dates found in the data. Date filtering will be disabled.")
+    start_date = None
+    end_date = None
+
 # --- Main Dashboard Container ---
 dashboard_container = st.container()
 
 with dashboard_container:
+    # Apply date filter to both datasets
+    filtered_paid_df = paid_raw_df.copy()
+    filtered_organic_df = organic_raw_df.copy()
+    
+    if start_date and end_date and all_dates:
+        # Filter paid data by date
+        if 'Date' in filtered_paid_df.columns:
+            paid_dates_parsed = pd.to_datetime(filtered_paid_df['Date'], errors='coerce')
+            date_mask = (paid_dates_parsed.dt.date >= start_date) & (paid_dates_parsed.dt.date <= end_date)
+            filtered_paid_df = filtered_paid_df[date_mask]
+        
+        # Filter organic data by date
+        if 'Created date' in filtered_organic_df.columns:
+            organic_dates_parsed = pd.to_datetime(filtered_organic_df['Created date'], errors='coerce')
+            date_mask = (organic_dates_parsed.dt.date >= start_date) & (organic_dates_parsed.dt.date <= end_date)
+            filtered_organic_df = filtered_organic_df[date_mask]
+    
+    # Aggregate filtered data
+    if not filtered_paid_df.empty:
+        paid_agg_data = filtered_paid_df.groupby('Campaign Name').agg(
+            Impressions=('Impressions', 'sum'),
+            Clicks=('Clicks', 'sum'),
+            Reach=('Reach', 'sum'),
+            Total_Spent=('Total Spent', 'sum'),
+            Total_Engagements=('Total Engagements', 'sum'),
+        ).reset_index()
+    else:
+        paid_agg_data = pd.DataFrame(columns=['Campaign Name', 'Impressions', 'Clicks', 'Reach', 'Total_Spent', 'Total_Engagements'])
+    
+    if not filtered_organic_df.empty:
+        organic_agg_data = filtered_organic_df.groupby(['Post title', 'Post type']).agg(
+            Impressions=('Impressions', 'sum'),
+            Views=('Views', 'sum'),
+            Clicks=('Clicks', 'sum'),
+            Likes=('Likes', 'sum'),
+            Comments=('Comments', 'sum'),
+            Reposts=('Reposts', 'sum'),
+            Follows=('Follows', 'sum'),
+            Total_Engagements=('Calculated Total Engagements', 'sum'),
+        ).reset_index()
+    else:
+        organic_agg_data = pd.DataFrame(columns=['Post title', 'Post type', 'Impressions', 'Views', 'Clicks', 'Likes', 'Comments', 'Reposts', 'Follows', 'Total_Engagements'])
+    
     # --- Total Section at the top ---
     st.markdown("<div class='section-header header-total'>Total</div>", unsafe_allow_html=True)
     total_cols = st.columns(2)
@@ -502,20 +616,25 @@ with dashboard_container:
     """, unsafe_allow_html=True)
     
     # Compact dropdown filter for paid campaigns using custom function
-    campaign_names_options = sorted(paid_agg_data['Campaign Name'].unique().tolist())
-    selected_paid_campaigns = compact_multiselect(
-        "Campaigns",
-        options=campaign_names_options,
-        default=campaign_names_options,
-        key='paid_campaign_select'
-    )
-    
-    # Process paid data based on filters
-    filtered_paid_data = pd.DataFrame()
-    if not selected_paid_campaigns:
-        filtered_paid_data = paid_agg_data.iloc[0:0]  # Empty DataFrame with same structure
+    if not paid_agg_data.empty:
+        campaign_names_options = sorted(paid_agg_data['Campaign Name'].unique().tolist())
+        selected_paid_campaigns = compact_multiselect(
+            "Campaigns",
+            options=campaign_names_options,
+            default=campaign_names_options,
+            key='paid_campaign_select'
+        )
+        
+        # Process paid data based on filters
+        filtered_paid_data = pd.DataFrame()
+        if not selected_paid_campaigns:
+            filtered_paid_data = paid_agg_data.iloc[0:0]  # Empty DataFrame with same structure
+        else:
+            filtered_paid_data = paid_agg_data[paid_agg_data['Campaign Name'].isin(selected_paid_campaigns)]
     else:
-        filtered_paid_data = paid_agg_data[paid_agg_data['Campaign Name'].isin(selected_paid_campaigns)]
+        selected_paid_campaigns = []
+        filtered_paid_data = pd.DataFrame()
+        st.info("No paid data available for the selected date range.")
     
     # Display Paid Metrics
     if not filtered_paid_data.empty:
@@ -545,7 +664,7 @@ with dashboard_container:
     else:
         current_paid_impressions = 0
         current_paid_clicks = 0
-        st.info("No data available for the selected paid campaign(s).")
+        st.info("No data available for the selected paid campaign(s) in the date range.")
     
     # --- Organic Section with Filters ---
     st.markdown("""
@@ -556,23 +675,32 @@ with dashboard_container:
     """, unsafe_allow_html=True)
     
     # Pre-filter organic data to only show "Organic" post type
-    organic_filtered_by_type = organic_agg_data[organic_agg_data['Post type'] == "Organic"]
-    
-    # Filter by post title using compact multiselect
-    organic_titles_options = sorted(organic_filtered_by_type['Post title'].unique().tolist())
-    selected_organic_posts = compact_multiselect(
-        "Posts",
-        options=organic_titles_options,
-        default=organic_titles_options,
-        key='organic_post_select'
-    )
-    
-    # Process organic data based on filters
-    filtered_organic_data = pd.DataFrame()
-    if not selected_organic_posts:
-        filtered_organic_data = organic_filtered_by_type.iloc[0:0]  # Empty DataFrame with same structure
+    if not organic_agg_data.empty:
+        organic_filtered_by_type = organic_agg_data[organic_agg_data['Post type'] == "Organic"]
+        
+        if not organic_filtered_by_type.empty:
+            # Filter by post title using compact multiselect
+            organic_titles_options = sorted(organic_filtered_by_type['Post title'].unique().tolist())
+            selected_organic_posts = compact_multiselect(
+                "Posts",
+                options=organic_titles_options,
+                default=organic_titles_options,
+                key='organic_post_select'
+            )
+            
+            # Process organic data based on filters
+            filtered_organic_data = pd.DataFrame()
+            if not selected_organic_posts:
+                filtered_organic_data = organic_filtered_by_type.iloc[0:0]  # Empty DataFrame with same structure
+            else:
+                filtered_organic_data = organic_filtered_by_type[organic_filtered_by_type['Post title'].isin(selected_organic_posts)]
+        else:
+            selected_organic_posts = []
+            filtered_organic_data = pd.DataFrame()
     else:
-        filtered_organic_data = organic_filtered_by_type[organic_filtered_by_type['Post title'].isin(selected_organic_posts)]
+        selected_organic_posts = []
+        filtered_organic_data = pd.DataFrame()
+        st.info("No organic data available for the selected date range.")
     
     # Display Organic Metrics
     if not filtered_organic_data.empty:
@@ -602,7 +730,7 @@ with dashboard_container:
     else:
         current_organic_impressions = 0
         current_organic_clicks = 0
-        st.info("No data available for the selected Organic posts.")
+        st.info("No data available for the selected Organic posts in the date range.")
     
     # Update total metrics now that we have calculated both paid and organic
     total_impressions = current_paid_impressions + current_organic_impressions
@@ -624,11 +752,12 @@ with paid_tab:
         st.info("No paid campaign(s) selected to show details.")
     else:
         for campaign_name in selected_paid_campaigns:
-            if campaign_name in paid_raw_df['Campaign Name'].unique().tolist():
+            campaign_rows = filtered_paid_df[filtered_paid_df['Campaign Name'] == campaign_name]
+            if not campaign_rows.empty:
                 # Create an expander for each campaign
                 with st.expander(f"Campaign: {campaign_name}"):
-                    # Get campaign details
-                    campaign_detail_row = paid_raw_df[paid_raw_df['Campaign Name'] == campaign_name].iloc[0]
+                    # Get campaign details from first row
+                    campaign_detail_row = campaign_rows.iloc[0]
                     
                     # Display campaign details in a clean format
                     details_cols = st.columns(2)
@@ -641,12 +770,13 @@ with paid_tab:
                         st.markdown(f"**Start Date:** {campaign_detail_row.get('Campaign Start Date', 'N/A')}")
                         st.markdown(f"**End Date:** {campaign_detail_row.get('Campaign End Date', 'N/A')}")
                     
-                    # Display campaign dates
-                    st.markdown("**Campaign Dates:**")
-                    unique_dates = paid_raw_df[paid_raw_df['Campaign Name'] == campaign_name]['Date'].unique()
+                    # Display campaign dates within selected range
+                    st.markdown("**Campaign Dates (in selected range):**")
+                    unique_dates = campaign_rows['Date'].unique()
                     date_cols = st.columns(4)
                     for i, date_item in enumerate(sorted(unique_dates)):
-                        date_cols[i % 4].markdown(f"• {date_item}")
+                        if pd.notna(date_item):
+                            date_cols[i % 4].markdown(f"• {date_item}")
 
 with organic_tab:
     # Always filter to only show Organic post type
@@ -656,10 +786,10 @@ with organic_tab:
         st.info(f"No {selected_post_type} post(s) selected to show details.")
     else:
         for post_title in selected_organic_posts:
-            # Filter by both title and selected post type
-            post_details_rows = organic_raw_df[
-                (organic_raw_df['Post title'] == post_title) & 
-                (organic_raw_df['Post type'] == selected_post_type)
+            # Filter by both title and selected post type within date range
+            post_details_rows = filtered_organic_df[
+                (filtered_organic_df['Post title'] == post_title) & 
+                (filtered_organic_df['Post type'] == selected_post_type)
             ]
             
             if not post_details_rows.empty:
