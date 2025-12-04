@@ -649,12 +649,11 @@ with dashboard_container:
         total_paid_cpc = (total_paid_spent / current_paid_clicks) if current_paid_clicks > 0 else 0
         total_paid_cpm = (total_paid_spent / current_paid_impressions * 1000) if current_paid_impressions > 0 else 0
 
-        # Display metrics in a grid
-        paid_row1 = st.columns(4)
+        # Display metrics in a grid (REMOVED REACH)
+        paid_row1 = st.columns(3)
         with paid_row1[0]: st.metric("Impressions", f"{current_paid_impressions:,.0f}")
         with paid_row1[1]: st.metric("Clicks", f"{current_paid_clicks:,.0f}")
-        with paid_row1[2]: st.metric("Reach", f"{total_paid_reach:,.0f}")
-        with paid_row1[3]: st.metric("CTR", f"{total_paid_ctr:.2%}")
+        with paid_row1[2]: st.metric("CTR", f"{total_paid_ctr:.2%}")
         
         paid_row2 = st.columns(4)
         with paid_row2[0]: st.metric("Total Engagements", f"{total_paid_engagements:,.0f}")
